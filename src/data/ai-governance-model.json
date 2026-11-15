@@ -1,0 +1,953 @@
+{
+  "model": "AI Governance, smallest data model",
+  "assumptions": [
+    "One currency per organization (not stored)",
+    "Prompt content is never stored",
+    "Price per seat uses one app-wide assumed value (shown as 'Estimate') when an invoice price is missing",
+    "Company monthly limit = sum of department limits (not stored)",
+    "Rules for alerts are system-defined; only thresholds and channels are set per department",
+    "Company monthly cap is stored separately from department limits; a mismatch is displayed rather than silently recalculated.",
+    "Tool blocking is excluded from v1; tool status actions require human review and are audited."
+  ],
+  "enums": {
+    "tool_category": [
+      "assistant",
+      "code",
+      "image",
+      "meeting",
+      "search",
+      "other"
+    ],
+    "connector_group": [
+      "identity",
+      "ai_vendor",
+      "finance",
+      "discovery"
+    ],
+    "connector_availability": [
+      "available",
+      "coming_later"
+    ],
+    "connection_status": [
+      "connected",
+      "sync_error",
+      "disconnected"
+    ],
+    "approval_status": [
+      "approved",
+      "unapproved",
+      "under_review",
+      "blocked"
+    ],
+    "app_role": [
+      "admin",
+      "finance",
+      "department_head",
+      "executive_viewer"
+    ],
+    "alert_type": [
+      "department_threshold",
+      "company_cap",
+      "new_unapproved_tool",
+      "sync_failure"
+    ],
+    "alert_status": [
+      "open",
+      "acknowledged",
+      "resolved"
+    ],
+    "notify_channel": [
+      "email",
+      "slack"
+    ],
+    "audit_action": [
+      "limit_changed",
+      "tool_status_changed",
+      "migration_requested",
+      "seats_reclaimed",
+      "source_connected",
+      "source_disconnected"
+    ],
+    "alert_severity": [
+      "critical",
+      "high",
+      "medium",
+      "low"
+    ],
+    "delivery_status": [
+      "sent",
+      "failed"
+    ]
+  },
+  "entities": [
+    {
+      "name": "ToolCatalog",
+      "layer": "seed",
+      "purpose": "Known AI tools, so a card charge or login can be recognised as AI and named consistently",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "vendor",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "category",
+          "type": "enum(tool_category)",
+          "required": true
+        },
+        {
+          "name": "match_keys",
+          "type": "string[]",
+          "required": true,
+          "note": "domains and merchant names used for detection and name matching"
+        },
+        {
+          "name": "sanctioned_alternative_id",
+          "type": "uuid",
+          "required": false,
+          "note": "approved counterpart for 'Request migration', e.g. personal accounts to the team plan"
+        }
+      ]
+    },
+    {
+      "name": "ConnectorCatalog",
+      "layer": "seed",
+      "purpose": "Sources a customer can connect (Okta, OpenAI, Ramp, CSV, browser extension)",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "group",
+          "type": "enum(connector_group)",
+          "required": true
+        },
+        {
+          "name": "provides",
+          "type": "string",
+          "required": true,
+          "note": "one line shown on the card"
+        },
+        {
+          "name": "recommended",
+          "type": "boolean",
+          "required": true,
+          "note": "counts toward the completeness indicator"
+        },
+        {
+          "name": "availability",
+          "type": "enum(connector_availability)",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Organization",
+      "layer": "customer",
+      "purpose": "The customer company (tenant)",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "governance_started_on",
+          "type": "date",
+          "required": false,
+          "note": "drives the 'Governance started' marker on the trend chart"
+        },
+        {
+          "name": "company_monthly_cap",
+          "type": "decimal",
+          "required": true,
+          "note": "separate from the sum of department limits; mismatches are shown"
+        }
+      ]
+    },
+    {
+      "name": "Person",
+      "layer": "customer",
+      "purpose": "Employee from the identity directory; also the app user when app_role is set",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "work_email",
+          "type": "string",
+          "required": true,
+          "note": "matching key across all sources"
+        },
+        {
+          "name": "display_name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "department_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "required": true,
+          "note": "false when the person left; keeps history intact"
+        }
+      ]
+    },
+    {
+      "name": "Department",
+      "layer": "customer",
+      "purpose": "Cost center with a limit, an owner and alert settings",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "owner_person_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "monthly_limit",
+          "type": "decimal",
+          "required": true
+        },
+        {
+          "name": "alert_thresholds_pct",
+          "type": "int[]",
+          "required": true,
+          "note": "default [80, 100]; 120 optional"
+        },
+        {
+          "name": "notify_channels",
+          "type": "enum(notify_channel)[]",
+          "required": true,
+          "note": "default [email]"
+        },
+        {
+          "name": "slack_channel",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "financial_approver_person_id",
+          "type": "uuid",
+          "required": false,
+          "note": "finance approver for budget decisions"
+        }
+      ]
+    },
+    {
+      "name": "Connection",
+      "layer": "customer",
+      "purpose": "One connected source for one customer",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "connector_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "enum(connection_status)",
+          "required": true
+        },
+        {
+          "name": "last_synced_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "last_error",
+          "type": "string",
+          "required": false,
+          "note": "e.g. 'API key expired'"
+        },
+        {
+          "name": "credentials_ref",
+          "type": "string",
+          "required": true,
+          "note": "pointer to a secrets vault, never the secret"
+        }
+      ]
+    },
+    {
+      "name": "OrgTool",
+      "layer": "customer",
+      "purpose": "An AI tool found in this company, with its approval status",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "tool_catalog_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "approval_status",
+          "type": "enum(approval_status)",
+          "required": true,
+          "note": "default 'unapproved' on detection; the approved list is simply status = approved"
+        },
+        {
+          "name": "owner_person_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "seats_purchased",
+          "type": "int",
+          "required": false,
+          "note": "only for seat-based plans"
+        },
+        {
+          "name": "price_per_seat",
+          "type": "decimal",
+          "required": false,
+          "note": "empty means use the assumed price and show 'Estimate'"
+        },
+        {
+          "name": "renewal_on",
+          "type": "date",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "ToolUser",
+      "layer": "customer",
+      "purpose": "One person using one tool: activity and whether they hold a paid seat",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_tool_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "person_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "has_paid_seat",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "last_active_at",
+          "type": "datetime",
+          "required": true
+        }
+      ],
+      "unique": [
+        "org_tool_id",
+        "person_id"
+      ]
+    },
+    {
+      "name": "SpendRecord",
+      "layer": "customer",
+      "purpose": "One payment or invoice line for a tool",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_tool_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "amount",
+          "type": "decimal",
+          "required": true
+        },
+        {
+          "name": "incurred_on",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "department_id",
+          "type": "uuid",
+          "required": false,
+          "note": "empty means Unassigned"
+        },
+        {
+          "name": "person_id",
+          "type": "uuid",
+          "required": false,
+          "note": "cardholder, for personal-card detection"
+        },
+        {
+          "name": "connection_id",
+          "type": "uuid",
+          "required": true,
+          "note": "which source it came from; also used to avoid double counting"
+        }
+      ]
+    },
+    {
+      "name": "ToolSnapshot",
+      "layer": "customer",
+      "purpose": "Daily history of each tool's status and active users; the only history that cannot be rebuilt",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_tool_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "taken_on",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "approval_status",
+          "type": "enum(approval_status)",
+          "required": true
+        },
+        {
+          "name": "active_users",
+          "type": "int",
+          "required": true
+        }
+      ],
+      "unique": [
+        "org_tool_id",
+        "taken_on"
+      ]
+    },
+    {
+      "name": "Alert",
+      "layer": "customer",
+      "purpose": "A warning that was raised, with its status",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "type",
+          "type": "enum(alert_type)",
+          "required": true
+        },
+        {
+          "name": "department_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "org_tool_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "connection_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "threshold_pct",
+          "type": "int",
+          "required": false
+        },
+        {
+          "name": "raised_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "enum(alert_status)",
+          "required": true
+        },
+        {
+          "name": "severity",
+          "type": "enum(alert_severity)",
+          "required": true
+        },
+        {
+          "name": "owner_person_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "suggested_action",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "action_taken",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "resolved_at",
+          "type": "datetime",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "AuditEvent",
+      "layer": "customer",
+      "purpose": "Who changed what and when (limits, tool status, requests, reclaims, sources)",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "actor_person_id",
+          "type": "uuid",
+          "required": false,
+          "note": "empty for system actions"
+        },
+        {
+          "name": "action",
+          "type": "enum(audit_action)",
+          "required": true
+        },
+        {
+          "name": "target_type",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "target_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "occurred_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "detail",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "AlertRule",
+      "layer": "customer",
+      "purpose": "Editable notification rule controlling trigger, recipients, channels and enabled state",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "type",
+          "type": "enum(alert_type)",
+          "required": true
+        },
+        {
+          "name": "threshold_pct",
+          "type": "int",
+          "required": false
+        },
+        {
+          "name": "recipient_person_ids",
+          "type": "uuid[]",
+          "required": true
+        },
+        {
+          "name": "channels",
+          "type": "enum(notify_channel)[]",
+          "required": true
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "updated_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "AlertDelivery",
+      "layer": "customer",
+      "purpose": "Delivery attempt history for an alert or rule notification",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "alert_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "rule_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "recipient_person_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "channel",
+          "type": "enum(notify_channel)",
+          "required": true
+        },
+        {
+          "name": "attempted_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "enum(delivery_status)",
+          "required": true
+        },
+        {
+          "name": "error_detail",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "AppRoleAssignment",
+      "layer": "customer",
+      "purpose": "Application authorization roles, stored separately from employee profile data",
+      "fields": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "org_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "person_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "role",
+          "type": "enum(app_role)",
+          "required": true
+        },
+        {
+          "name": "granted_by_person_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "granted_at",
+          "type": "datetime",
+          "required": true
+        }
+      ],
+      "unique": [
+        "person_id",
+        "role"
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "from": "Organization",
+      "to": "Person",
+      "type": "one-to-many",
+      "label": "employs"
+    },
+    {
+      "from": "Organization",
+      "to": "Department",
+      "type": "one-to-many",
+      "label": "has"
+    },
+    {
+      "from": "Organization",
+      "to": "Connection",
+      "type": "one-to-many",
+      "label": "connects"
+    },
+    {
+      "from": "Organization",
+      "to": "OrgTool",
+      "type": "one-to-many",
+      "label": "tracks"
+    },
+    {
+      "from": "Organization",
+      "to": "Alert",
+      "type": "one-to-many",
+      "label": "raises"
+    },
+    {
+      "from": "Organization",
+      "to": "AuditEvent",
+      "type": "one-to-many",
+      "label": "logs"
+    },
+    {
+      "from": "Department",
+      "to": "Person",
+      "type": "one-to-many",
+      "label": "includes"
+    },
+    {
+      "from": "Person",
+      "to": "Department",
+      "type": "one-to-many",
+      "label": "owns"
+    },
+    {
+      "from": "ConnectorCatalog",
+      "to": "Connection",
+      "type": "one-to-many",
+      "label": "is instance of"
+    },
+    {
+      "from": "ToolCatalog",
+      "to": "OrgTool",
+      "type": "one-to-many",
+      "label": "identifies"
+    },
+    {
+      "from": "ToolCatalog",
+      "to": "ToolCatalog",
+      "type": "zero-or-one-to-many",
+      "label": "has approved alternative"
+    },
+    {
+      "from": "Person",
+      "to": "OrgTool",
+      "type": "zero-or-one-to-many",
+      "label": "is owner of"
+    },
+    {
+      "from": "OrgTool",
+      "to": "ToolUser",
+      "type": "one-to-many",
+      "label": "is used by"
+    },
+    {
+      "from": "Person",
+      "to": "ToolUser",
+      "type": "one-to-many",
+      "label": "uses"
+    },
+    {
+      "from": "OrgTool",
+      "to": "SpendRecord",
+      "type": "one-to-many",
+      "label": "costs"
+    },
+    {
+      "from": "Department",
+      "to": "SpendRecord",
+      "type": "zero-or-one-to-many",
+      "label": "is charged"
+    },
+    {
+      "from": "Person",
+      "to": "SpendRecord",
+      "type": "zero-or-one-to-many",
+      "label": "paid by"
+    },
+    {
+      "from": "Connection",
+      "to": "SpendRecord",
+      "type": "one-to-many",
+      "label": "imports"
+    },
+    {
+      "from": "OrgTool",
+      "to": "ToolSnapshot",
+      "type": "one-to-many",
+      "label": "is recorded daily as"
+    },
+    {
+      "from": "Department",
+      "to": "Alert",
+      "type": "zero-or-one-to-many",
+      "label": "is subject of"
+    },
+    {
+      "from": "OrgTool",
+      "to": "Alert",
+      "type": "zero-or-one-to-many",
+      "label": "is subject of"
+    },
+    {
+      "from": "Connection",
+      "to": "Alert",
+      "type": "zero-or-one-to-many",
+      "label": "is subject of"
+    },
+    {
+      "from": "Person",
+      "to": "AuditEvent",
+      "type": "zero-or-one-to-many",
+      "label": "performs"
+    },
+    {
+      "from": "Person",
+      "to": "Department",
+      "type": "zero-or-one-to-many",
+      "label": "approves finances for"
+    },
+    {
+      "from": "Person",
+      "to": "Alert",
+      "type": "zero-or-one-to-many",
+      "label": "owns action for"
+    },
+    {
+      "from": "Organization",
+      "to": "AlertRule",
+      "type": "one-to-many",
+      "label": "configures"
+    },
+    {
+      "from": "Organization",
+      "to": "AlertDelivery",
+      "type": "one-to-many",
+      "label": "records deliveries"
+    },
+    {
+      "from": "Alert",
+      "to": "AlertDelivery",
+      "type": "zero-or-one-to-many",
+      "label": "is delivered as"
+    },
+    {
+      "from": "AlertRule",
+      "to": "AlertDelivery",
+      "type": "zero-or-one-to-many",
+      "label": "produces deliveries"
+    },
+    {
+      "from": "Person",
+      "to": "AppRoleAssignment",
+      "type": "one-to-many",
+      "label": "has explicit application role assignments"
+    }
+  ]
+}

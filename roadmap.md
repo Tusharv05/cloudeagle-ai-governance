@@ -1,0 +1,2 @@
+- [ ] Build the eight-screen AI governance dashboard and align the uploaded data model.
+- [ ] Verify navigation, key interactions, responsive layout, tests, and preview logs.
